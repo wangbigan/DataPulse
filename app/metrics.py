@@ -1,0 +1,69 @@
+from __future__ import annotations
+
+
+METRICS = [
+    {
+        "metric_code": "FILL_RATE",
+        "name": "有值率",
+        "definition": "非 NULL 且非空串的行占比。",
+        "formula": "1 - (null_cnt + empty_cnt) / row_count",
+        "denominator": "当前统计范围内的总行数。",
+        "boundary": "row_count = 0 时显示为无法计算；Oracle 空串归入 NULL。",
+    },
+    {
+        "metric_code": "VALID_RATE",
+        "name": "有效率",
+        "definition": "排除 NULL、空串和占位值后的行占比。",
+        "formula": "1 - (null_cnt + empty_cnt + placeholder_cnt) / row_count",
+        "denominator": "当前统计范围内的总行数。",
+        "boundary": "占位值默认仅对字符串型字段生效；数值 0 视为合法值。",
+    },
+    {
+        "metric_code": "DUP_RATE",
+        "name": "重复率",
+        "definition": "非空有效取值中重复值占比。",
+        "formula": "1 - distinct_cnt / non_empty_cnt",
+        "denominator": "非 NULL 且非空串的行数。",
+        "boundary": "distinct 跳过时显示为无法计算；估算 distinct 超界时钳制到 0-1。",
+    },
+    {
+        "metric_code": "VALUE_DIST",
+        "name": "值域分布",
+        "definition": "低基数字段的取值分布，敏感 skip 字段不落盘。",
+        "formula": "count(value) group by value",
+        "denominator": "字段总行数。",
+        "boundary": "NULL 与空串使用哨兵标签展示；真实值冲突时转义。",
+    },
+    {
+        "metric_code": "SAMPLE_DATA",
+        "name": "样例数据",
+        "definition": "随机抽取的字段样例，受敏感配置约束。",
+        "formula": "random sample limit N",
+        "denominator": "非 NULL 候选行。",
+        "boundary": "skip 字段不取样例；mask 字段只保存脱敏值。",
+    },
+    {
+        "metric_code": "PK_DUP",
+        "name": "主键重复率",
+        "definition": "声明主键列组合出现重复时，重复冗余行数占表总行数的比例。",
+        "formula": "SUM(cnt - 1 for GROUP BY pk HAVING cnt > 1) / row_count",
+        "denominator": "当前表总行数。",
+        "boundary": "无声明主键时指标不存在；空表分母为 0 时重复率为空。",
+    },
+    {
+        "metric_code": "PHYSICAL_FK",
+        "name": "物理外键",
+        "definition": "数据库系统目录中已声明的 FOREIGN KEY 约束。",
+        "formula": "COUNT(physical_fk)",
+        "denominator": "当前快照扫描范围内的表。",
+        "boundary": "仅统计扫描范围内子表和父表都存在的物理外键。",
+    },
+    {
+        "metric_code": "MATCH_RATE",
+        "name": "关联率",
+        "definition": "子表外键非空行在父表键值中可匹配的比例。",
+        "formula": "matched_rows / child_fk_non_empty_rows",
+        "denominator": "外键列均非 NULL 的子表行数。",
+        "boundary": "外键全为空时关联率为空；当前实现按物理外键 raw 等值比较。",
+    },
+]

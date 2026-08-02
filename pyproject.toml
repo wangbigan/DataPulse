@@ -1,0 +1,24 @@
+[project]
+name = "datapulse"
+version = "0.1.0"
+description = "DataPulse MVP: scanning engine, DuckDB metadata warehouse, static browser, and report export."
+requires-python = ">=3.11"
+dependencies = [
+    "duckdb>=1.0.0",
+    "fastapi>=0.111.0",
+    "pydantic>=2.7.0",
+    "python-docx>=1.1.2",
+    "pyyaml>=6.0.1",
+    "uvicorn[standard]>=0.30.0",
+]
+
+[project.optional-dependencies]
+connectors = [
+    "oracledb>=2.0.0",
+    "pymysql>=1.1.0",
+    "sqlalchemy>=2.0.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+

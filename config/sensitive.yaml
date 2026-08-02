@@ -1,0 +1,20 @@
+# MVP sensitive-field policy. These rules are imported on startup.
+# action: skip = never persist values/samples; mask = persist masked values.
+sensitive:
+  - pattern: "(姓名|patient_name|(^|\\b|_)name(\\b|$)|xm$)"
+    action: mask
+    reason: "姓名字段默认脱敏"
+  - pattern: "(身份证|id_card|sfzh|card_no)"
+    action: skip
+    reason: "身份证号默认不落盘"
+  - pattern: "(电话|手机|mobile|phone|tel)"
+    action: mask
+    reason: "联系电话默认脱敏"
+  - pattern: "(地址|addr|address|住址)"
+    action: skip
+    reason: "地址默认不落盘"
+  - pattern: "(病案号|住院号|medical_record|mrn|zyh)"
+    action: mask
+    reason: "病案号默认脱敏"
+
+dimensions: []
