@@ -129,6 +129,10 @@ class MetadataStore:
                 pk_duplicate_rows BIGINT,
                 pk_duplicate_rate DOUBLE,
                 pk_duplicate_skipped_reason VARCHAR,
+                data_duplicate_columns VARCHAR,
+                data_duplicate_rows BIGINT,
+                data_duplicate_rate DOUBLE,
+                data_duplicate_skipped_reason VARCHAR,
                 date_column VARCHAR,
                 min_date VARCHAR,
                 max_date VARCHAR,
@@ -234,6 +238,17 @@ class MetadataStore:
             )
             """,
             """
+            CREATE TABLE IF NOT EXISTS attribute_key_config (
+                source_id VARCHAR NOT NULL DEFAULT '',
+                schema_name VARCHAR NOT NULL DEFAULT 'main',
+                table_name VARCHAR NOT NULL,
+                column_name VARCHAR NOT NULL,
+                key_group VARCHAR NOT NULL DEFAULT 'default',
+                ordinal_position INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (source_id, schema_name, table_name, key_group, column_name)
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS metric_registry (
                 metric_code VARCHAR NOT NULL,
                 version VARCHAR NOT NULL,
@@ -265,6 +280,10 @@ class MetadataStore:
                 "pk_duplicate_rows": "BIGINT",
                 "pk_duplicate_rate": "DOUBLE",
                 "pk_duplicate_skipped_reason": "VARCHAR",
+                "data_duplicate_columns": "VARCHAR",
+                "data_duplicate_rows": "BIGINT",
+                "data_duplicate_rate": "DOUBLE",
+                "data_duplicate_skipped_reason": "VARCHAR",
             },
         )
 
@@ -332,6 +351,33 @@ class MetadataStore:
                     item.get("dimension_name", "机构"),
                 ],
             )
+        self.execute("DELETE FROM attribute_key_config")
+        duplicate_items = (
+            data.get("attribute_keys")
+            or data.get("data_duplicate_keys")
+            or data.get("duplicate_keys")
+            or []
+        )
+        for item in duplicate_items:
+            columns = item.get("columns") or item.get("fields") or item.get("column_names") or []
+            if item.get("column_name"):
+                columns = [item["column_name"]]
+            for idx, column in enumerate(columns):
+                self.execute(
+                    """
+                    INSERT INTO attribute_key_config
+                    (source_id, schema_name, table_name, column_name, key_group, ordinal_position)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        item.get("source_id") or "",
+                        item.get("schema_name", "main"),
+                        item["table_name"],
+                        str(column),
+                        item.get("key_group", "default"),
+                        idx,
+                    ],
+                )
 
     def add_audit(self, event_type: str, detail: dict[str, Any]) -> None:
         self.execute(

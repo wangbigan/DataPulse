@@ -369,11 +369,11 @@ async function loadMetrics() {
     boundary: "当前 MVP 未采集该指标，页面按模板保留位置。",
   };
   state.metrics.ATTR_DUP ||= {
-    name: "属性组合重复率",
-    definition: "按人工配置的唯一性字段组合计算的重复行占比。",
-    formula: "dup_attr_rows / row_count",
+    name: "数据重复率",
+    definition: "按配置的属性标识字段组合计算的重复冗余行占比。",
+    formula: "data_duplicate_rows / row_count",
     denominator: "表总行数。",
-    boundary: "当前 MVP 未采集唯一性字段组合，页面按模板保留位置。",
+    boundary: "未配置属性标识字段时指标不存在；配置字段为空的行不参与重复组合计算；空表分母为 0 时重复率为空。",
   };
   state.metrics.MATCH_RATE ||= {
     name: "关联率",
@@ -499,6 +499,30 @@ function jsonList(value) {
   }
 }
 
+function duplicateReasonText(reason) {
+  if (!reason) return "";
+  if (reason === "no_declared_primary_key") return "无声明主键";
+  if (reason === "no_attribute_key_config") return "未配置属性标识字段";
+  if (reason.startsWith("attribute_key_column_missing:")) return "配置字段缺失";
+  if (reason.startsWith("data_duplicate_failed:")) return "计算失败";
+  if (reason.startsWith("pk_duplicate_failed:")) return "计算失败";
+  return reason;
+}
+
+function duplicateRateCell(rate, reason, metric, columns = null) {
+  if (rate === null || rate === undefined || Number.isNaN(Number(rate))) {
+    const text = duplicateReasonText(reason) || "—";
+    return `<span class="na" data-metric="${metric}">${esc(text)}</span>`;
+  }
+  const n = Number(rate);
+  const columnText = columns?.length ? `<div class="td-sub mono">${esc(columns.join(", "))}</div>` : "";
+  return `
+    <div class="dup-cell">
+      <b class="${n > 0 ? "bad" : "good"}-text" data-metric="${metric}">${fmtPct(n)}</b>
+      ${columnText}
+    </div>`;
+}
+
 function relationLabel(row) {
   const childColumns = jsonList(row.child_columns_json).join(", ");
   const parentColumns = jsonList(row.parent_columns_json).join(", ");
@@ -575,15 +599,16 @@ function renderL0() {
 
     <section class="grid-2 fade" style="--d:220">
       <div class="card">
-        <h3>表平均有值率排名 <span class="h3-sub" data-metric="FILL_RATE">按表聚合升序</span></h3>
+        <h3>表平均有值率排名 <span class="h3-sub" data-metric="FILL_RATE">按表聚合升序 · Top 10</span><a class="h3-link" href="#/tables">查看全部</a></h3>
         ${renderTableFillBoard()}
       </div>
       <div class="card">
         <h3>数据重复榜
           <span class="dup-toggle">
             <button class="on" type="button"><span data-metric="PK_DUP">主键重复率</span></button>
-            <button type="button"><span data-metric="ATTR_DUP">属性组合重复率</span></button>
+            <button type="button"><span data-metric="ATTR_DUP">数据重复率</span></button>
           </span>
+          <a class="h3-link" href="#/tables">查看全部</a>
         </h3>
         ${renderDupBoard()}
       </div>
@@ -836,7 +861,7 @@ function renderRelationGraph() {
 }
 
 function renderTableFillBoard() {
-  const rows = [...state.tables].sort((a, b) => Number(a.avg_fill_rate ?? 2) - Number(b.avg_fill_rate ?? 2)).slice(0, 8);
+  const rows = [...state.tables].sort((a, b) => Number(a.avg_fill_rate ?? 2) - Number(b.avg_fill_rate ?? 2)).slice(0, 10);
   if (!rows.length) return `<div class="na block-empty">暂无表指标</div>`;
   return rows.map((t, i) => `
     <button class="lb-row fade" style="--d:${200 + i * 40}" data-table-route="${esc(t.table_id)}" type="button">
@@ -860,20 +885,21 @@ function renderGapBoard() {
 }
 
 function renderDupBoard() {
-  const rows = state.dashboard?.pk_duplicates || [];
+  const rows = (state.dashboard?.duplicate_tables || state.dashboard?.pk_duplicates || []).slice(0, 10);
   if (!rows.length) {
     return `
       <div class="placeholder-panel">
-        <div class="placeholder-title">当前快照没有声明主键表</div>
-        <p>主键重复率只对数据库已声明主键的表计算；没有声明主键时指标为空，不按字段重复率替代。</p>
+        <div class="placeholder-title">当前快照没有可展示的重复率指标</div>
+        <p>主键重复率依赖数据库声明主键；数据重复率依赖属性标识字段配置。未配置时指标为空，可在表列表查看原因。</p>
       </div>`;
   }
+  const max = Math.max(0.01, ...rows.map((t) => Math.max(Number(t.data_duplicate_rate || 0), Number(t.pk_duplicate_rate || 0))));
   return rows.map((t, i) => `
     <button class="lb-row pkdup-row fade" style="--d:${200 + i * 40}" data-table-route="${esc(t.table_id)}" type="button">
       <span class="lb-rank">${i + 1}</span>
-      <span class="lb-name"><b>${esc(t.table_name)}</b><i>PK ${esc(primaryKeyLabel(t))} · ${fmtNum(t.row_count)} 行</i></span>
-      <span class="lb-bar"><span class="lb-fill ${pctClass(1 - Number(t.pk_duplicate_rate || 0))}" style="width:${Math.max(2, Number(t.pk_duplicate_rate || 0) * 100)}%"></span></span>
-      <span class="lb-val ${Number(t.pk_duplicate_rate || 0) > 0 ? "bad" : "good"}-text">${fmtPct(t.pk_duplicate_rate || 0)}</span>
+      <span class="lb-name"><b>${esc(t.table_name)}</b><i>数据 ${fmtPct(t.data_duplicate_rate)} · 主键 ${fmtPct(t.pk_duplicate_rate)} · ${fmtNum(t.row_count)} 行</i></span>
+      <span class="lb-bar"><span class="lb-fill ${Math.max(Number(t.data_duplicate_rate || 0), Number(t.pk_duplicate_rate || 0)) > 0 ? "bad" : "good"}" style="width:${Math.max(2, Math.max(Number(t.data_duplicate_rate || 0), Number(t.pk_duplicate_rate || 0)) / max * 100)}%"></span></span>
+      <span class="lb-val ${Math.max(Number(t.data_duplicate_rate || 0), Number(t.pk_duplicate_rate || 0)) > 0 ? "bad" : "good"}-text">${fmtPct(Math.max(Number(t.data_duplicate_rate || 0), Number(t.pk_duplicate_rate || 0)))}</span>
     </button>`).join("");
 }
 
@@ -982,6 +1008,8 @@ function renderL1() {
           <th data-sort="row_count" class="num">行数</th>
           <th data-sort="column_count" class="num">字段数</th>
           <th data-sort="avg_fill_rate">平均有值率 <span data-metric="FILL_RATE" class="m-name">?</span></th>
+          <th data-sort="pk_duplicate_rate" class="num">主键重复率 <span data-metric="PK_DUP" class="m-name">?</span></th>
+          <th data-sort="data_duplicate_rate" class="num">数据重复率 <span data-metric="ATTR_DUP" class="m-name">?</span></th>
           <th>主键</th>
           <th>时间跨度</th>
         </tr></thead>
@@ -1011,7 +1039,7 @@ function filteredTables() {
 
 function renderTableRows() {
   const rows = filteredTables();
-  if (!rows.length) return `<tr><td colspan="7" class="na" style="text-align:center;padding:32px">无匹配表</td></tr>`;
+  if (!rows.length) return `<tr><td colspan="9" class="na" style="text-align:center;padding:32px">无匹配表</td></tr>`;
   return rows.map((t, i) => `
     <tr class="fade" style="--d:${Math.min(i, 20) * 20}" data-table-route="${esc(t.table_id)}">
       <td><b class="mono">${esc(t.table_name)}</b><div class="td-sub">${esc(t.table_comment || "")}</div></td>
@@ -1019,6 +1047,8 @@ function renderTableRows() {
       <td class="num">${fmtNum(t.row_count)}</td>
       <td class="num">${fmt(t.column_count)}</td>
       <td><div class="cellbar"><span class="cellbar-fill ${pctClass(t.avg_fill_rate)}" style="width:${Math.max(2, Number(t.avg_fill_rate || 0) * 100)}%"></span><em class="${pctClass(t.avg_fill_rate)}-text">${fmtPct(t.avg_fill_rate)}</em></div></td>
+      <td class="num">${duplicateRateCell(t.pk_duplicate_rate, t.pk_duplicate_skipped_reason, "PK_DUP")}</td>
+      <td class="num">${duplicateRateCell(t.data_duplicate_rate, t.data_duplicate_skipped_reason, "ATTR_DUP", jsonList(t.data_duplicate_columns))}</td>
       <td>${primaryKeyLabel(t) === "—" ? '<span class="na">—</span>' : `<span class="pk mono">${esc(primaryKeyLabel(t))}</span>`}</td>
       <td class="td-sub">${t.date_column ? `${esc(t.min_date)} ~ ${esc(t.max_date)}<div>via ${esc(t.date_column)}</div>` : '<span class="na">—</span>'}</td>
     </tr>`).join("");
@@ -1073,6 +1103,7 @@ async function renderL2(tableId) {
           <div class="tile"><i data-metric="FILL_RATE" class="m-name">平均有值率</i><b class="${pctClass(t.avg_fill_rate)}-text">${fmtPct(t.avg_fill_rate)}</b></div>
           <div class="tile"><i>主键</i><b class="mono" style="font-size:13px">${esc(primaryKeyLabel(t))}</b></div>
           <div class="tile"><i data-metric="PK_DUP" class="m-name">主键重复率</i><b class="${Number(t.pk_duplicate_rate || 0) > 0 ? "bad" : "good"}-text">${t.pk_duplicate_skipped_reason ? "—" : fmtPct(t.pk_duplicate_rate || 0)}</b></div>
+          <div class="tile"><i data-metric="ATTR_DUP" class="m-name">数据重复率</i><b class="${Number(t.data_duplicate_rate || 0) > 0 ? "bad" : "good"}-text">${t.data_duplicate_skipped_reason ? "—" : fmtPct(t.data_duplicate_rate || 0)}</b></div>
           <div class="tile"><i>时间跨度</i><b class="tile-date">${t.date_column ? `${esc(t.min_date)} ~ ${esc(t.max_date)}<span>via ${esc(t.date_column)}</span>` : "—"}</b></div>
         </div>
       </div>

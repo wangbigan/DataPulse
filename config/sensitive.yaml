@@ -18,3 +18,11 @@ sensitive:
     reason: "病案号默认脱敏"
 
 dimensions: []
+
+# Configure table-level attribute identifiers for data duplicate rate.
+# Example:
+# attribute_keys:
+#   - schema_name: main
+#     table_name: patient
+#     columns: [name, birth_date, id_card]
+attribute_keys: []

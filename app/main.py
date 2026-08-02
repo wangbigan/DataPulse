@@ -256,7 +256,7 @@ def dashboard(snapshot_id: str | None = None) -> JSONResponse:
         LEFT JOIN table_stat ts ON ts.snapshot_id = mt.snapshot_id AND ts.table_id = mt.table_id
         WHERE mt.snapshot_id = ?
         ORDER BY ts.row_count DESC NULLS LAST, mt.table_name
-        LIMIT 12
+        LIMIT 10
         """,
         [sid],
     )
@@ -284,15 +284,21 @@ def dashboard(snapshot_id: str | None = None) -> JSONResponse:
         """,
         [sid],
     )
-    pk_duplicates = store.query(
+    duplicate_tables = store.query(
         """
         SELECT mt.table_id, mt.table_name, mt.schema_name, mt.primary_key, ts.row_count,
-               ts.pk_duplicate_rows, ts.pk_duplicate_rate, ts.pk_duplicate_skipped_reason
+               ts.pk_duplicate_rows, ts.pk_duplicate_rate, ts.pk_duplicate_skipped_reason,
+               ts.data_duplicate_columns, ts.data_duplicate_rows, ts.data_duplicate_rate,
+               ts.data_duplicate_skipped_reason
         FROM table_stat ts
         JOIN meta_table mt ON mt.snapshot_id = ts.snapshot_id AND mt.table_id = ts.table_id
-        WHERE ts.snapshot_id = ? AND mt.primary_key IS NOT NULL
-        ORDER BY ts.pk_duplicate_rate DESC NULLS LAST, ts.pk_duplicate_rows DESC NULLS LAST, mt.table_name
-        LIMIT 12
+        WHERE ts.snapshot_id = ?
+          AND (ts.pk_duplicate_rate IS NOT NULL OR ts.data_duplicate_rate IS NOT NULL)
+        ORDER BY GREATEST(COALESCE(ts.data_duplicate_rate, 0), COALESCE(ts.pk_duplicate_rate, 0)) DESC,
+                 COALESCE(ts.data_duplicate_rows, 0) DESC,
+                 COALESCE(ts.pk_duplicate_rows, 0) DESC,
+                 mt.table_name
+        LIMIT 10
         """,
         [sid],
     )
@@ -315,7 +321,8 @@ def dashboard(snapshot_id: str | None = None) -> JSONResponse:
             "top_tables": top_tables,
             "low_columns": low_columns,
             "gap_columns": gap_columns,
-            "pk_duplicates": pk_duplicates,
+            "pk_duplicates": duplicate_tables,
+            "duplicate_tables": duplicate_tables,
             "relations": relations,
             "progress": scanner.progress(sid),
         }
@@ -330,6 +337,8 @@ def tables(snapshot_id: str | None = None, q: str = "") -> JSONResponse:
         """
         SELECT mt.*, ts.row_count, ts.avg_fill_rate, ts.avg_valid_rate,
                ts.pk_duplicate_rows, ts.pk_duplicate_rate, ts.pk_duplicate_skipped_reason,
+               ts.data_duplicate_columns, ts.data_duplicate_rows, ts.data_duplicate_rate,
+               ts.data_duplicate_skipped_reason,
                ts.date_column, ts.min_date, ts.max_date
         FROM meta_table mt
         LEFT JOIN table_stat ts ON ts.snapshot_id = mt.snapshot_id AND ts.table_id = mt.table_id
@@ -349,6 +358,8 @@ def table_detail(table_id: str, snapshot_id: str | None = None) -> JSONResponse:
         """
         SELECT mt.*, ts.row_count, ts.avg_fill_rate, ts.avg_valid_rate,
                ts.pk_duplicate_rows, ts.pk_duplicate_rate, ts.pk_duplicate_skipped_reason,
+               ts.data_duplicate_columns, ts.data_duplicate_rows, ts.data_duplicate_rate,
+               ts.data_duplicate_skipped_reason,
                ts.date_column, ts.min_date, ts.max_date
         FROM meta_table mt
         LEFT JOIN table_stat ts ON ts.snapshot_id = mt.snapshot_id AND ts.table_id = mt.table_id

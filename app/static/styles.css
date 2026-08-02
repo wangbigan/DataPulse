@@ -151,6 +151,14 @@ button.danger { color: var(--bad); border-color: #fecaca; }
 .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 14px; }
 h3 { font-size: 14px; margin-bottom: 14px; }
 .h3-sub { font-size: 11px; color: var(--mut); font-weight: 400; margin-left: 8px; }
+.h3-link {
+  float: right;
+  margin-left: 10px;
+  color: var(--teal);
+  font-size: 12px;
+  font-weight: 600;
+}
+.h3-link:hover { color: var(--teal-l); }
 .chart { height: 340px; }
 .timecard { position: relative; cursor: help; overflow: visible; }
 .time-pop {
@@ -398,6 +406,8 @@ h3 { font-size: 14px; margin-bottom: 14px; }
 .cellbar { display: flex; align-items: center; gap: 8px; height: 10px; background: #eef2f6; border-radius: 5px; position: relative; min-width: 118px; }
 .cellbar-fill { display: block; height: 100%; border-radius: 5px; }
 .cellbar em { font-style: normal; font-size: 11px; font-weight: 700; margin-left: auto; padding-left: 8px; font-variant-numeric: tabular-nums; }
+.dup-cell { display: grid; gap: 2px; justify-items: end; min-width: 74px; }
+.dup-cell b { font-size: 12px; font-variant-numeric: tabular-nums; }
 .mini { display: inline-flex; width: 130px; height: 10px; border-radius: 5px; overflow: hidden; background: #eef2f6; }
 .mini-seg { display: block; height: 100%; }
 .seg-0 { background: #14b8a6; } .seg-1 { background: #0ea5e9; } .seg-2 { background: #f59e0b; } .seg-3 { background: #8b5cf6; }
@@ -585,7 +595,7 @@ h3 { font-size: 14px; margin-bottom: 14px; }
   .rel-chart { height: 100%; min-height: 0; }
   .rel-placeholder { min-height: 320px; height: 320px; }
   .rel-legend { position: static; padding: 0 16px 14px; }
-  .tbl { min-width: 780px; }
+  .tbl { min-width: 980px; }
   .card { overflow-x: auto; }
   .dr-stats { grid-template-columns: repeat(2, 1fr); }
   #drawer { width: 100vw; max-width: 100vw; }

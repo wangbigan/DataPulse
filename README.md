@@ -95,6 +95,19 @@ distinct_count IS NOT NULL AND distinct_count <= low_cardinality_limit
 
 默认策略覆盖姓名、身份证、电话/手机、地址、病案号/住院号等常见字段。具体规则以 `config/sensitive.yaml` 为准。
 
+### 数据重复率
+
+数据重复率按 `config/sensitive.yaml` 里的 `attribute_keys` 配置计算。每条配置指定一张表的一组属性标识字段；扫描时对这些字段组合做去重检查，重复冗余行数除以表总行数：
+
+```yaml
+attribute_keys:
+  - schema_name: main
+    table_name: patient
+    columns: [name, birth_date, mobile]
+```
+
+未配置属性标识字段、配置字段不存在或源库查询失败时，表列表会显示对应原因，指标不按 0 处理。
+
 ## MySQL 测试
 
 MySQL 连接串格式：

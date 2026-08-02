@@ -212,7 +212,16 @@ class ScanManager:
                 )
                 row_task = self._ensure_table_task(snapshot_id, source["source_id"], "rowcount", table_row["table_id"], 1, 2)
                 if row_task["status"] != "done":
-                    self._run_task(row_task["task_id"], lambda table=table, table_row=table_row: self._scan_rowcount(conn, snapshot_id, table_row["table_id"], table))
+                    self._run_task(
+                        row_task["task_id"],
+                        lambda table=table, table_row=table_row: self._scan_rowcount(
+                            conn,
+                            snapshot_id,
+                            source["source_id"],
+                            table_row["table_id"],
+                            table,
+                        ),
+                    )
                 if self._should_wait(snapshot_id):
                     return
 
@@ -353,10 +362,16 @@ class ScanManager:
         relation_rows = self._physical_relation_rows(conn, snapshot_id, table_id_by_key)
         self.store.replace_rows("meta_relation", "snapshot_id = ?", [snapshot_id], relation_rows)
 
-    def _scan_rowcount(self, conn, snapshot_id: str, table_id: str, table: TableRef) -> None:
+    def _scan_rowcount(self, conn, snapshot_id: str, source_id: str, table_id: str, table: TableRef) -> None:
         row = conn.query(f"SELECT COUNT(*) AS row_count FROM {conn.table_sql(table)}")[0]
         row_count = int(row["row_count"] or 0)
         pk_duplicate_rows, pk_duplicate_rate, pk_duplicate_skipped_reason = self._pk_duplicate_stats(conn, table, row_count)
+        (
+            data_duplicate_columns,
+            data_duplicate_rows,
+            data_duplicate_rate,
+            data_duplicate_skipped_reason,
+        ) = self._data_duplicate_stats(conn, snapshot_id, source_id, table_id, table, row_count)
         self.store.replace_rows(
             "table_stat",
             "snapshot_id = ? AND table_id = ?",
@@ -371,6 +386,10 @@ class ScanManager:
                     "pk_duplicate_rows": pk_duplicate_rows,
                     "pk_duplicate_rate": pk_duplicate_rate,
                     "pk_duplicate_skipped_reason": pk_duplicate_skipped_reason,
+                    "data_duplicate_columns": data_duplicate_columns,
+                    "data_duplicate_rows": data_duplicate_rows,
+                    "data_duplicate_rate": data_duplicate_rate,
+                    "data_duplicate_skipped_reason": data_duplicate_skipped_reason,
                     "date_column": None,
                     "min_date": None,
                     "max_date": None,
@@ -401,6 +420,59 @@ class ScanManager:
             return None, None, f"pk_duplicate_failed: {exc}"
         duplicate_rows = int(row["duplicate_rows"] or 0)
         return duplicate_rows, duplicate_rows / row_count, None
+
+    def _data_duplicate_stats(
+        self,
+        conn,
+        snapshot_id: str,
+        source_id: str,
+        table_id: str,
+        table: TableRef,
+        row_count: int,
+    ) -> tuple[str | None, int | None, float | None, str | None]:
+        key_columns = self._attribute_key_columns(source_id, table)
+        if not key_columns:
+            return None, None, None, "no_attribute_key_config"
+        configured_columns_json = write_json(key_columns)
+        available = self.store.query(
+            """
+            SELECT column_name
+            FROM meta_column
+            WHERE snapshot_id = ? AND table_id = ?
+            """,
+            [snapshot_id, table_id],
+        )
+        column_by_lower = {row["column_name"].lower(): row["column_name"] for row in available}
+        resolved_columns = [column_by_lower.get(column.lower()) for column in key_columns]
+        if any(column is None for column in resolved_columns):
+            missing = [column for column, resolved in zip(key_columns, resolved_columns) if resolved is None]
+            return configured_columns_json, None, None, f"attribute_key_column_missing: {', '.join(missing)}"
+        if row_count <= 0:
+            return configured_columns_json, 0, None, None
+
+        actual_columns = [str(column) for column in resolved_columns if column is not None]
+        key_sql = ", ".join(conn.quote(column) for column in actual_columns)
+        non_empty_sql = " AND ".join(
+            f"{conn.quote(column)} IS NOT NULL AND TRIM({conn.text_cast_sql(conn.quote(column))}) <> ''"
+            for column in actual_columns
+        )
+        try:
+            row = conn.query(
+                f"""
+                SELECT COALESCE(SUM(cnt - 1), 0) AS duplicate_rows
+                FROM (
+                    SELECT {key_sql}, COUNT(*) AS cnt
+                    FROM {conn.table_sql(table)}
+                    WHERE {non_empty_sql}
+                    GROUP BY {key_sql}
+                    HAVING COUNT(*) > 1
+                ) data_dup
+                """
+            )[0]
+        except Exception as exc:
+            return configured_columns_json, None, None, f"data_duplicate_failed: {exc}"
+        duplicate_rows = int(row["duplicate_rows"] or 0)
+        return configured_columns_json, duplicate_rows, duplicate_rows / row_count, None
 
     def _scan_columns(self, conn, snapshot_id: str, table_id: str, table: TableRef) -> None:
         columns = self.store.query(
@@ -863,6 +935,40 @@ class ScanManager:
         if not isinstance(parsed, list):
             return []
         return [str(item) for item in parsed]
+
+    def _attribute_key_columns(self, source_id: str, table: TableRef) -> list[str]:
+        rows = self.store.query(
+            """
+            SELECT source_id, schema_name, column_name, key_group, ordinal_position
+            FROM attribute_key_config
+            WHERE table_name = ?
+              AND schema_name IN (?, '*', '')
+              AND source_id IN (?, '', '*')
+            ORDER BY
+              CASE WHEN source_id = ? THEN 0 ELSE 1 END,
+              CASE WHEN schema_name = ? THEN 0 ELSE 1 END,
+              key_group,
+              ordinal_position,
+              column_name
+            """,
+            [
+                table.table_name,
+                table.schema_name,
+                source_id,
+                source_id,
+                table.schema_name,
+            ],
+        )
+        if not rows:
+            return []
+        selected = rows[0]
+        return [
+            row["column_name"]
+            for row in rows
+            if row["source_id"] == selected["source_id"]
+            and row["schema_name"] == selected["schema_name"]
+            and row["key_group"] == selected["key_group"]
+        ]
 
     def _snapshot_exists(self, snapshot_id: str) -> bool:
         return bool(self.store.scalar("SELECT 1 FROM scan_snapshot WHERE snapshot_id = ?", [snapshot_id]))

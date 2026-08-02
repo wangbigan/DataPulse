@@ -51,6 +51,14 @@ METRICS = [
         "boundary": "无声明主键时指标不存在；空表分母为 0 时重复率为空。",
     },
     {
+        "metric_code": "ATTR_DUP",
+        "name": "数据重复率",
+        "definition": "按配置的属性标识字段组合计算的重复冗余行占比。",
+        "formula": "data_duplicate_rows / row_count",
+        "denominator": "当前表总行数。",
+        "boundary": "未配置属性标识字段时指标不存在；配置字段为空的行不参与重复组合计算；空表分母为 0 时重复率为空。",
+    },
+    {
         "metric_code": "PHYSICAL_FK",
         "name": "物理外键",
         "definition": "数据库系统目录中已声明的 FOREIGN KEY 约束。",
