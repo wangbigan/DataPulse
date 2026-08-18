@@ -169,6 +169,31 @@ python .\scripts\create_demo_mysql.py "mysql://user:password@127.0.0.1:3306/data
 - `POST /api/reports/{snapshot_id}/docx`
 - `POST /api/samples/clear`
 
+## 大模型元数据增强
+
+DataPulse 支持通过 OpenAI-compatible Chat Completions API 对已探查到的元数据做增强。默认不启用；配置环境变量后，可手动触发或在扫描流程中自动触发。
+
+```powershell
+$env:DATAPULSE_LLM_API_KEY="sk-..."
+$env:DATAPULSE_LLM_BASE_URL="https://api.openai.com/v1"
+$env:DATAPULSE_LLM_MODEL="gpt-4.1-mini"
+$env:DATAPULSE_LLM_AUTO_ENRICH="false"
+```
+
+增强结果会落入 `llm_enrichment_run`、`llm_table_annotation`、`llm_column_annotation`、`llm_relation_suggestion`。当 `apply_changes=true` 时，系统会把可验证的建议应用回现有元数据：
+
+- 逻辑主键：只在表没有声明主键时补入 `meta_table.primary_key`。
+- 逻辑外键：写入 `meta_relation(relation_type='logical_fk')`，并可刷新 `relation_stat` 关联率。
+- 敏感字段：回填 `meta_column.is_sensitive/sensitive_action/sensitive_reason`，并清理对应样例和值域分布。
+- 属性标志字段：写入 `attribute_key_config(key_group='llm')`，用于刷新数据重复率。
+- 业务含义、业务域、字典字段等注释保存在 LLM 注释表，并随表/字段 API 返回。
+
+相关 API：
+
+- `GET /api/llm/config`
+- `POST /api/llm/enrich/{snapshot_id}`
+- `GET /api/llm/enrichments/{snapshot_id}`
+
 ## 目录说明
 
 - `app/main.py`：FastAPI 入口和 API 路由。

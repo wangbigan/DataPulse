@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .datasource import open_source
+from .llm_enrichment import LlmConfigError, LlmMetadataEnhancer
 from .report import generate_docx_report
 from .scanner import ScanManager
 from .settings import ROOT_DIR, get_settings
@@ -34,6 +35,12 @@ class SourceIn(BaseModel):
 class ScanIn(BaseModel):
     source_id: str
     tables: list[str] = Field(default_factory=list)
+
+
+class LlmEnrichIn(BaseModel):
+    apply_changes: bool = True
+    recompute_stats: bool = True
+    extra_instructions: str | None = None
 
 
 def ok(data: Any) -> JSONResponse:
@@ -73,10 +80,10 @@ def create_source(payload: SourceIn) -> JSONResponse:
 def delete_source(source_id: str) -> JSONResponse:
     source = store.query("SELECT source_id, name FROM data_source WHERE source_id = ?", [source_id])
     if not source:
-        raise HTTPException(status_code=404, detail="数据源不存在。")
+        raise HTTPException(status_code=404, detail="Data source does not exist.")
     snapshot_count = store.scalar("SELECT COUNT(*) FROM scan_snapshot WHERE source_id = ?", [source_id]) or 0
     if int(snapshot_count) > 0:
-        raise HTTPException(status_code=400, detail=f"该数据源已有 {snapshot_count} 个快照，不能删除。")
+        raise HTTPException(status_code=400, detail=f"Data source has {snapshot_count} snapshots and cannot be deleted.")
     store.execute("DELETE FROM data_source WHERE source_id = ?", [source_id])
     store.checkpoint()
     store.add_audit("data_source_deleted", {"source_id": source_id, "name": source[0]["name"]})
@@ -149,7 +156,7 @@ def snapshot_tasks(snapshot_id: str) -> JSONResponse:
         [snapshot_id],
     )
     if not snapshot_rows:
-        raise HTTPException(status_code=404, detail="快照不存在。")
+        raise HTTPException(status_code=404, detail="Snapshot does not exist.")
     tasks = store.query(
         """
         SELECT
@@ -196,6 +203,15 @@ def resume_scan(snapshot_id: str) -> JSONResponse:
     return ok({"ok": True})
 
 
+@app.post("/api/scans/{snapshot_id}/rerun-failed")
+def rerun_failed_scan(snapshot_id: str) -> JSONResponse:
+    try:
+        result = scanner.rerun_failed(snapshot_id)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ok(result)
+
+
 @app.delete("/api/snapshots/{snapshot_id}")
 def delete_snapshot(snapshot_id: str) -> JSONResponse:
     scanner.delete_snapshot(snapshot_id)
@@ -209,7 +225,7 @@ def resolve_snapshot(snapshot_id: str | None) -> str:
         "SELECT snapshot_id FROM scan_snapshot ORDER BY COALESCE(finished_at, started_at) DESC NULLS LAST LIMIT 1"
     )
     if not latest:
-        raise HTTPException(status_code=404, detail="没有可用快照。")
+        raise HTTPException(status_code=404, detail="No snapshot is available.")
     return latest[0]["snapshot_id"]
 
 
@@ -226,6 +242,8 @@ def dashboard(snapshot_id: str | None = None) -> JSONResponse:
           (SELECT AVG(avg_valid_rate) FROM table_stat WHERE snapshot_id = ?) AS avg_valid_rate,
           (SELECT COUNT(*) FROM meta_column WHERE snapshot_id = ? AND is_sensitive) AS sensitive_columns,
           (SELECT COUNT(*) FROM meta_relation WHERE snapshot_id = ? AND relation_type = 'physical_fk') AS physical_foreign_keys,
+          (SELECT COUNT(*) FROM meta_relation WHERE snapshot_id = ? AND relation_type = 'logical_fk') AS logical_foreign_keys,
+          (SELECT COUNT(*) FROM meta_relation WHERE snapshot_id = ?) AS relation_count,
           (
             SELECT COUNT(DISTINCT child_table_id)
             FROM meta_relation
@@ -247,11 +265,18 @@ def dashboard(snapshot_id: str | None = None) -> JSONResponse:
             WHERE snapshot_id = ? AND distinct_count IS NOT NULL AND distinct_count <= ?
           ) AS dictionary_candidates
         """,
-        [sid, sid, sid, sid, sid, sid, sid, sid, sid, sid, sid, sid, settings.low_cardinality_limit],
+        [sid, sid, sid, sid, sid, sid, sid, sid, sid, sid, sid, sid, sid, sid, settings.low_cardinality_limit],
     )[0]
     top_tables = store.query(
         """
-        SELECT mt.table_id, mt.table_name, mt.column_count, ts.row_count, ts.avg_fill_rate, ts.avg_valid_rate
+        SELECT mt.table_id, mt.table_name, mt.column_count, ts.row_count, ts.avg_fill_rate, ts.avg_valid_rate,
+               (
+                 SELECT business_domain
+                 FROM llm_table_annotation lta
+                 WHERE lta.snapshot_id = mt.snapshot_id AND lta.table_id = mt.table_id
+                 ORDER BY lta.computed_at DESC
+                 LIMIT 1
+               ) AS business_domain
         FROM meta_table mt
         LEFT JOIN table_stat ts ON ts.snapshot_id = mt.snapshot_id AND ts.table_id = mt.table_id
         WHERE mt.snapshot_id = ?
@@ -339,7 +364,28 @@ def tables(snapshot_id: str | None = None, q: str = "") -> JSONResponse:
                ts.pk_duplicate_rows, ts.pk_duplicate_rate, ts.pk_duplicate_skipped_reason,
                ts.data_duplicate_columns, ts.data_duplicate_rows, ts.data_duplicate_rate,
                ts.data_duplicate_skipped_reason,
-               ts.date_column, ts.min_date, ts.max_date
+               ts.date_column, ts.min_date, ts.max_date,
+               (
+                 SELECT business_name
+                 FROM llm_table_annotation lta
+                 WHERE lta.snapshot_id = mt.snapshot_id AND lta.table_id = mt.table_id
+                 ORDER BY lta.computed_at DESC
+                 LIMIT 1
+               ) AS business_name,
+               (
+                 SELECT business_description
+                 FROM llm_table_annotation lta
+                 WHERE lta.snapshot_id = mt.snapshot_id AND lta.table_id = mt.table_id
+                 ORDER BY lta.computed_at DESC
+                 LIMIT 1
+               ) AS business_description,
+               (
+                 SELECT business_domain
+                 FROM llm_table_annotation lta
+                 WHERE lta.snapshot_id = mt.snapshot_id AND lta.table_id = mt.table_id
+                 ORDER BY lta.computed_at DESC
+                 LIMIT 1
+               ) AS business_domain
         FROM meta_table mt
         LEFT JOIN table_stat ts ON ts.snapshot_id = mt.snapshot_id AND ts.table_id = mt.table_id
         WHERE mt.snapshot_id = ?
@@ -360,7 +406,28 @@ def table_detail(table_id: str, snapshot_id: str | None = None) -> JSONResponse:
                ts.pk_duplicate_rows, ts.pk_duplicate_rate, ts.pk_duplicate_skipped_reason,
                ts.data_duplicate_columns, ts.data_duplicate_rows, ts.data_duplicate_rate,
                ts.data_duplicate_skipped_reason,
-               ts.date_column, ts.min_date, ts.max_date
+               ts.date_column, ts.min_date, ts.max_date,
+               (
+                 SELECT business_name
+                 FROM llm_table_annotation lta
+                 WHERE lta.snapshot_id = mt.snapshot_id AND lta.table_id = mt.table_id
+                 ORDER BY lta.computed_at DESC
+                 LIMIT 1
+               ) AS business_name,
+               (
+                 SELECT business_description
+                 FROM llm_table_annotation lta
+                 WHERE lta.snapshot_id = mt.snapshot_id AND lta.table_id = mt.table_id
+                 ORDER BY lta.computed_at DESC
+                 LIMIT 1
+               ) AS business_description,
+               (
+                 SELECT business_domain
+                 FROM llm_table_annotation lta
+                 WHERE lta.snapshot_id = mt.snapshot_id AND lta.table_id = mt.table_id
+                 ORDER BY lta.computed_at DESC
+                 LIMIT 1
+               ) AS business_domain
         FROM meta_table mt
         LEFT JOIN table_stat ts ON ts.snapshot_id = mt.snapshot_id AND ts.table_id = mt.table_id
         WHERE mt.snapshot_id = ? AND mt.table_id = ?
@@ -368,13 +435,48 @@ def table_detail(table_id: str, snapshot_id: str | None = None) -> JSONResponse:
         [sid, table_id],
     )
     if not table_rows:
-        raise HTTPException(status_code=404, detail="表不存在。")
+        raise HTTPException(status_code=404, detail="Table does not exist.")
     columns = store.query(
         """
         SELECT mc.*, cs.row_count, cs.null_count, cs.empty_count, cs.placeholder_count,
                cs.distinct_count, cs.fill_rate, cs.valid_rate, cs.duplicate_rate,
                cs.min_value, cs.max_value, cs.avg_value, cs.is_estimated, cs.skipped_reason,
-               cs.computed_at
+               cs.computed_at,
+               (
+                 SELECT business_name
+                 FROM llm_column_annotation lca
+                 WHERE lca.snapshot_id = mc.snapshot_id AND lca.column_id = mc.column_id
+                 ORDER BY lca.computed_at DESC
+                 LIMIT 1
+               ) AS business_name,
+               (
+                 SELECT business_description
+                 FROM llm_column_annotation lca
+                 WHERE lca.snapshot_id = mc.snapshot_id AND lca.column_id = mc.column_id
+                 ORDER BY lca.computed_at DESC
+                 LIMIT 1
+               ) AS business_description,
+               (
+                 SELECT is_dictionary
+                 FROM llm_column_annotation lca
+                 WHERE lca.snapshot_id = mc.snapshot_id AND lca.column_id = mc.column_id
+                 ORDER BY lca.computed_at DESC
+                 LIMIT 1
+               ) AS is_dictionary,
+               (
+                 SELECT dictionary_name
+                 FROM llm_column_annotation lca
+                 WHERE lca.snapshot_id = mc.snapshot_id AND lca.column_id = mc.column_id
+                 ORDER BY lca.computed_at DESC
+                 LIMIT 1
+               ) AS dictionary_name,
+               (
+                 SELECT is_attribute_key
+                 FROM llm_column_annotation lca
+                 WHERE lca.snapshot_id = mc.snapshot_id AND lca.column_id = mc.column_id
+                 ORDER BY lca.computed_at DESC
+                 LIMIT 1
+               ) AS is_attribute_key
         FROM meta_column mc
         LEFT JOIN column_stat cs ON cs.snapshot_id = mc.snapshot_id AND cs.column_id = mc.column_id
         WHERE mc.snapshot_id = ? AND mc.table_id = ?
@@ -419,7 +521,42 @@ def column_detail(column_id: str, snapshot_id: str | None = None) -> JSONRespons
     sid = resolve_snapshot(snapshot_id)
     column_rows = store.query(
         """
-        SELECT mc.*, cs.*
+        SELECT mc.*, cs.*,
+               (
+                 SELECT business_name
+                 FROM llm_column_annotation lca
+                 WHERE lca.snapshot_id = mc.snapshot_id AND lca.column_id = mc.column_id
+                 ORDER BY lca.computed_at DESC
+                 LIMIT 1
+               ) AS business_name,
+               (
+                 SELECT business_description
+                 FROM llm_column_annotation lca
+                 WHERE lca.snapshot_id = mc.snapshot_id AND lca.column_id = mc.column_id
+                 ORDER BY lca.computed_at DESC
+                 LIMIT 1
+               ) AS business_description,
+               (
+                 SELECT is_dictionary
+                 FROM llm_column_annotation lca
+                 WHERE lca.snapshot_id = mc.snapshot_id AND lca.column_id = mc.column_id
+                 ORDER BY lca.computed_at DESC
+                 LIMIT 1
+               ) AS is_dictionary,
+               (
+                 SELECT dictionary_name
+                 FROM llm_column_annotation lca
+                 WHERE lca.snapshot_id = mc.snapshot_id AND lca.column_id = mc.column_id
+                 ORDER BY lca.computed_at DESC
+                 LIMIT 1
+               ) AS dictionary_name,
+               (
+                 SELECT is_attribute_key
+                 FROM llm_column_annotation lca
+                 WHERE lca.snapshot_id = mc.snapshot_id AND lca.column_id = mc.column_id
+                 ORDER BY lca.computed_at DESC
+                 LIMIT 1
+               ) AS is_attribute_key
         FROM meta_column mc
         LEFT JOIN column_stat cs ON cs.snapshot_id = mc.snapshot_id AND cs.column_id = mc.column_id
         WHERE mc.snapshot_id = ? AND mc.column_id = ?
@@ -427,7 +564,7 @@ def column_detail(column_id: str, snapshot_id: str | None = None) -> JSONRespons
         [sid, column_id],
     )
     if not column_rows:
-        raise HTTPException(status_code=404, detail="字段不存在。")
+        raise HTTPException(status_code=404, detail="Column does not exist.")
     dist = store.query(
         """
         SELECT value_label, value_count, ratio, is_masked
@@ -466,6 +603,99 @@ def metrics(snapshot_id: str | None = None) -> JSONResponse:
         version = store.scalar("SELECT metric_def_version FROM scan_snapshot WHERE snapshot_id = ?", [sid]) or version
     rows = store.query("SELECT * FROM metric_registry WHERE version = ? ORDER BY metric_code", [version])
     return ok(rows)
+
+
+@app.get("/api/llm/config")
+def llm_config() -> JSONResponse:
+    return ok(
+        {
+            "configured": bool(settings.llm_api_key),
+            "auto_enrich": settings.llm_auto_enrich,
+            "base_url": settings.llm_base_url,
+            "model": settings.llm_model,
+            "max_tables_per_request": settings.llm_max_tables_per_request,
+            "timeout_seconds": settings.llm_timeout_seconds,
+        }
+    )
+
+
+@app.post("/api/llm/enrich/{snapshot_id}")
+def run_llm_enrichment(snapshot_id: str, payload: LlmEnrichIn) -> JSONResponse:
+    try:
+        result = LlmMetadataEnhancer(store, settings).enrich_snapshot(
+            snapshot_id,
+            apply_changes=payload.apply_changes,
+            extra_instructions=payload.extra_instructions,
+        )
+        recompute = None
+        if payload.apply_changes and payload.recompute_stats:
+            recompute = scanner.recompute_enriched_stats(snapshot_id)
+    except LlmConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ok({**result, "recompute": recompute})
+
+
+@app.get("/api/llm/enrichments/{snapshot_id}")
+def llm_enrichments(snapshot_id: str, run_id: str | None = None) -> JSONResponse:
+    runs = store.query(
+        """
+        SELECT run_id, snapshot_id, provider, model, prompt_version, status, apply_changes,
+               error_message, started_at, finished_at
+        FROM llm_enrichment_run
+        WHERE snapshot_id = ?
+        ORDER BY started_at DESC
+        """,
+        [snapshot_id],
+    )
+    selected_run_id = run_id
+    if selected_run_id is None and runs:
+        selected_run_id = runs[0]["run_id"]
+    if selected_run_id is None:
+        return ok({"snapshot_id": snapshot_id, "runs": [], "selected_run_id": None, "tables": [], "columns": [], "relations": []})
+    tables = store.query(
+        """
+        SELECT lta.*, mt.schema_name, mt.table_name
+        FROM llm_table_annotation lta
+        JOIN meta_table mt ON mt.snapshot_id = lta.snapshot_id AND mt.table_id = lta.table_id
+        WHERE lta.snapshot_id = ? AND lta.run_id = ?
+        ORDER BY mt.schema_name, mt.table_name
+        """,
+        [snapshot_id, selected_run_id],
+    )
+    columns = store.query(
+        """
+        SELECT lca.*, mc.schema_name, mc.table_name, mc.column_name, mc.data_type
+        FROM llm_column_annotation lca
+        JOIN meta_column mc ON mc.snapshot_id = lca.snapshot_id AND mc.column_id = lca.column_id
+        WHERE lca.snapshot_id = ? AND lca.run_id = ?
+        ORDER BY mc.schema_name, mc.table_name, mc.ordinal_position
+        """,
+        [snapshot_id, selected_run_id],
+    )
+    relations = store.query(
+        """
+        SELECT lrs.*, ct.schema_name AS child_schema, ct.table_name AS child_table,
+               pt.schema_name AS parent_schema, pt.table_name AS parent_table
+        FROM llm_relation_suggestion lrs
+        JOIN meta_table ct ON ct.snapshot_id = lrs.snapshot_id AND ct.table_id = lrs.child_table_id
+        JOIN meta_table pt ON pt.snapshot_id = lrs.snapshot_id AND pt.table_id = lrs.parent_table_id
+        WHERE lrs.snapshot_id = ? AND lrs.run_id = ?
+        ORDER BY child_table, parent_table
+        """,
+        [snapshot_id, selected_run_id],
+    )
+    return ok(
+        {
+            "snapshot_id": snapshot_id,
+            "runs": runs,
+            "selected_run_id": selected_run_id,
+            "tables": tables,
+            "columns": columns,
+            "relations": relations,
+        }
+    )
 
 
 @app.get("/api/export-review/{snapshot_id}")

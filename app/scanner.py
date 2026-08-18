@@ -96,6 +96,10 @@ class ScanManager:
 
     def _delete_snapshot_rows(self, snapshot_id: str) -> None:
         for table in [
+            "llm_relation_suggestion",
+            "llm_column_annotation",
+            "llm_table_annotation",
+            "llm_enrichment_run",
             "value_dist",
             "sample_data",
             "relation_stat",
@@ -140,6 +144,81 @@ class ScanManager:
             self.store.scalar("SELECT scope_json FROM scan_snapshot WHERE snapshot_id = ?", [snapshot_id]) or "{}"
         )
         self.executor.submit(self._run_snapshot, snapshot_id, source_rows[0], scope.get("tables", []))
+
+    def rerun_failed(self, snapshot_id: str) -> dict[str, Any]:
+        rows = self.store.query(
+            """
+            SELECT ss.snapshot_id, ss.status AS snapshot_status, ss.scope_json, ds.*
+            FROM scan_snapshot ss
+            JOIN data_source ds ON ds.source_id = ss.source_id
+            WHERE ss.snapshot_id = ?
+            """,
+            [snapshot_id],
+        )
+        if not rows:
+            raise ValueError("Snapshot does not exist.")
+        snapshot = rows[0]
+        if snapshot["snapshot_status"] in {"created", "running", "paused"}:
+            raise ValueError("Snapshot is active. Pause/resume it or wait for it to finish before rerunning failed tasks.")
+        active = self.store.query(
+            """
+            SELECT snapshot_id
+            FROM scan_snapshot
+            WHERE source_id = ?
+              AND snapshot_id <> ?
+              AND status IN ('created', 'running', 'paused')
+            """,
+            [snapshot["source_id"], snapshot_id],
+        )
+        if active:
+            raise ValueError("Another snapshot for this data source is active. Wait for it to finish before rerunning.")
+
+        tasks = self.store.query("SELECT * FROM scan_task WHERE snapshot_id = ?", [snapshot_id])
+        failed_tasks = [task for task in tasks if task["status"] == "failed"]
+        if not failed_tasks:
+            raise ValueError("Snapshot has no failed tasks to rerun.")
+
+        reset_task_ids = sorted(self._dependent_rerun_task_ids(tasks, failed_tasks))
+        placeholders = ", ".join(["?"] * len(reset_task_ids))
+        self.store.execute(
+            f"""
+            UPDATE scan_task
+            SET status = 'ready',
+                error_message = NULL,
+                started_at = NULL,
+                finished_at = NULL
+            WHERE task_id IN ({placeholders})
+            """,
+            reset_task_ids,
+        )
+        self.store.execute(
+            """
+            UPDATE scan_snapshot
+            SET status = 'running',
+                finished_at = NULL,
+                error_message = NULL
+            WHERE snapshot_id = ?
+            """,
+            [snapshot_id],
+        )
+        self.store.add_audit(
+            "snapshot_failed_tasks_rerun",
+            {
+                "snapshot_id": snapshot_id,
+                "failed_task_count": len(failed_tasks),
+                "reset_task_count": len(reset_task_ids),
+            },
+        )
+        with self._control_lock:
+            self._paused.discard(snapshot_id)
+        scope = json.loads(snapshot.get("scope_json") or "{}")
+        self.executor.submit(self._run_snapshot, snapshot_id, snapshot, scope.get("tables", []))
+        return {
+            "ok": True,
+            "snapshot_id": snapshot_id,
+            "failed_task_count": len(failed_tasks),
+            "reset_task_count": len(reset_task_ids),
+        }
 
     def progress(self, snapshot_id: str) -> dict[str, Any]:
         rows = self.store.query(
@@ -196,6 +275,14 @@ class ScanManager:
                 self._run_task(struct_task["task_id"], lambda: self._scan_struct(conn, snapshot_id, source["source_id"], selected_tables))
             if self._should_wait(snapshot_id):
                 return
+
+            llm_task = self._next_task(snapshot_id, "llm_enrich")
+            if self.settings.llm_auto_enrich or (llm_task and llm_task["status"] != "done"):
+                llm_task = llm_task or self._ensure_snapshot_task(snapshot_id, source["source_id"], "llm_enrich", 1, 2)
+                if llm_task["status"] != "done":
+                    self._run_task(llm_task["task_id"], lambda: self._run_llm_enrichment(snapshot_id))
+                if self._should_wait(snapshot_id):
+                    return
 
             tables = self.store.query(
                 "SELECT * FROM meta_table WHERE snapshot_id = ? ORDER BY schema_name, table_name",
@@ -288,6 +375,43 @@ class ScanManager:
         task_id = self._insert_task(snapshot_id, source_id, typed, priority, weight)
         return self.store.query("SELECT * FROM scan_task WHERE task_id = ?", [task_id])[0]
 
+    def _dependent_rerun_task_ids(self, tasks: list[dict[str, Any]], failed_tasks: list[dict[str, Any]]) -> set[str]:
+        if any(task["task_type"] == "struct" for task in failed_tasks):
+            return {task["task_id"] for task in tasks}
+
+        reset_types = {task["task_type"] for task in failed_tasks}
+        for task in failed_tasks:
+            task_type = task["task_type"]
+            if task_type == "llm_enrich":
+                reset_types.update(
+                    candidate["task_type"]
+                    for candidate in tasks
+                    if candidate["task_type"] == "llm_enrich"
+                    or candidate["task_type"] in {"relation", "finalize"}
+                    or candidate["task_type"].startswith(("rowcount:", "column:", "value_dist_sample:"))
+                )
+                continue
+
+            table_id = self._task_table_id(task_type)
+            if task_type.startswith("rowcount:") and table_id:
+                reset_types.update(
+                    {
+                        task_type,
+                        f"column:{table_id}",
+                        f"value_dist_sample:{table_id}",
+                        "finalize",
+                    }
+                )
+            elif task_type.startswith("column:") and table_id:
+                reset_types.update({task_type, f"value_dist_sample:{table_id}", "finalize"})
+
+        return {task["task_id"] for task in tasks if task["task_type"] in reset_types}
+
+    def _task_table_id(self, task_type: str) -> str | None:
+        if ":" not in task_type:
+            return None
+        return task_type.split(":", 1)[1] or None
+
     def _run_task(self, task_id: str, action) -> None:
         self.store.execute(
             "UPDATE scan_task SET status = 'running', started_at = now(), attempt = attempt + 1 WHERE task_id = ?",
@@ -305,6 +429,51 @@ class ScanManager:
             "UPDATE scan_task SET status = 'done', finished_at = now(), error_message = NULL WHERE task_id = ?",
             [task_id],
         )
+
+    def recompute_enriched_stats(self, snapshot_id: str) -> dict[str, Any]:
+        source_rows = self.store.query(
+            """
+            SELECT ds.*
+            FROM scan_snapshot ss
+            JOIN data_source ds ON ds.source_id = ss.source_id
+            WHERE ss.snapshot_id = ?
+            """,
+            [snapshot_id],
+        )
+        if not source_rows:
+            raise ValueError("Snapshot does not exist.")
+        source = source_rows[0]
+        conn = open_source(source["dialect"], source["conn_uri"])
+        try:
+            tables = self.store.query(
+                "SELECT * FROM meta_table WHERE snapshot_id = ? ORDER BY schema_name, table_name",
+                [snapshot_id],
+            )
+            for table_row in tables:
+                table = TableRef(
+                    table_row["schema_name"],
+                    table_row["table_name"],
+                    table_row.get("table_comment"),
+                    table_row.get("primary_key"),
+                )
+                self._scan_rowcount(conn, snapshot_id, source["source_id"], table_row["table_id"], table)
+                self._scan_columns(conn, snapshot_id, table_row["table_id"], table)
+                self._scan_value_dist_and_samples(conn, snapshot_id, table_row["table_id"], table)
+            self._scan_relations(conn, snapshot_id)
+            self._finalize(snapshot_id)
+            self.store.checkpoint()
+            self.store.add_audit(
+                "llm_enriched_stats_recomputed",
+                {"snapshot_id": snapshot_id, "table_count": len(tables)},
+            )
+            return {"snapshot_id": snapshot_id, "table_count": len(tables), "relations_recomputed": True}
+        finally:
+            conn.close()
+
+    def _run_llm_enrichment(self, snapshot_id: str) -> None:
+        from .llm_enrichment import LlmMetadataEnhancer
+
+        LlmMetadataEnhancer(self.store, self.settings).enrich_snapshot(snapshot_id, apply_changes=True)
 
     def _scan_struct(
         self,

@@ -221,6 +221,74 @@ class MetadataStore:
             )
             """,
             """
+            CREATE TABLE IF NOT EXISTS llm_enrichment_run (
+                run_id VARCHAR PRIMARY KEY,
+                snapshot_id VARCHAR NOT NULL,
+                provider VARCHAR NOT NULL,
+                model VARCHAR NOT NULL,
+                prompt_version VARCHAR NOT NULL,
+                status VARCHAR NOT NULL,
+                apply_changes BOOLEAN NOT NULL DEFAULT false,
+                request_json VARCHAR,
+                response_json VARCHAR,
+                error_message VARCHAR,
+                started_at TIMESTAMP NOT NULL DEFAULT now(),
+                finished_at TIMESTAMP
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS llm_table_annotation (
+                snapshot_id VARCHAR NOT NULL,
+                table_id VARCHAR NOT NULL,
+                run_id VARCHAR NOT NULL,
+                business_name VARCHAR,
+                business_description VARCHAR,
+                business_domain VARCHAR,
+                logical_primary_key_json VARCHAR,
+                confidence DOUBLE,
+                reason VARCHAR,
+                computed_at TIMESTAMP NOT NULL DEFAULT now(),
+                PRIMARY KEY (snapshot_id, table_id, run_id)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS llm_column_annotation (
+                snapshot_id VARCHAR NOT NULL,
+                column_id VARCHAR NOT NULL,
+                table_id VARCHAR NOT NULL,
+                run_id VARCHAR NOT NULL,
+                business_name VARCHAR,
+                business_description VARCHAR,
+                is_dictionary BOOLEAN,
+                dictionary_name VARCHAR,
+                is_sensitive BOOLEAN,
+                sensitive_action VARCHAR,
+                sensitive_reason VARCHAR,
+                is_attribute_key BOOLEAN,
+                attribute_key_group VARCHAR,
+                confidence DOUBLE,
+                reason VARCHAR,
+                computed_at TIMESTAMP NOT NULL DEFAULT now(),
+                PRIMARY KEY (snapshot_id, column_id, run_id)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS llm_relation_suggestion (
+                snapshot_id VARCHAR NOT NULL,
+                relation_id VARCHAR NOT NULL,
+                run_id VARCHAR NOT NULL,
+                child_table_id VARCHAR NOT NULL,
+                parent_table_id VARCHAR NOT NULL,
+                child_columns_json VARCHAR NOT NULL,
+                parent_columns_json VARCHAR NOT NULL,
+                confidence DOUBLE,
+                reason VARCHAR,
+                status VARCHAR NOT NULL,
+                computed_at TIMESTAMP NOT NULL DEFAULT now(),
+                PRIMARY KEY (snapshot_id, relation_id, run_id)
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS sensitive_config (
                 pattern VARCHAR PRIMARY KEY,
                 action VARCHAR NOT NULL,

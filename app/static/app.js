@@ -130,6 +130,7 @@ function taskTypeLabel(task) {
   const tableName = taskTableName(task);
   const suffix = tableName ? ` · ${tableName}` : "";
   if (text === "struct") return "结构扫描";
+  if (text === "llm_enrich") return "LLM 元数据增强";
   if (text === "relation") return "关系扫描";
   if (text === "finalize") return "收尾汇总";
   if (text.startsWith("rowcount:")) return `行数统计${suffix}`;
@@ -439,6 +440,7 @@ function renderStat(label, value, formatter, metric, delay = 0, sub = "&nbsp;") 
 }
 
 function inferDomain(table) {
+  if (table.business_domain) return table.business_domain;
   const text = `${table.table_name || ""} ${table.table_comment || ""}`.toLowerCase();
   const rules = [
     ["患者", ["patient", "empi", "master_index", "患者"]],
@@ -571,7 +573,7 @@ function renderL0() {
         <div class="card stat small">
           <div class="stat-label"><span data-metric="PHYSICAL_FK" class="m-name">物理外键覆盖率</span></div>
           <div class="stat-value ${pctClass(o.physical_fk_coverage_rate)}-text">${fmtPct(o.physical_fk_coverage_rate)}</div>
-          <div class="stat-sub">${fmtNum(o.physical_foreign_keys)} 条物理外键 · ${fmtNum(o.physical_fk_tables)} 张子表</div>
+          <div class="stat-sub">${fmtNum(o.physical_foreign_keys)} 条物理外键 · ${fmtNum(o.logical_foreign_keys)} 条逻辑外键</div>
         </div>
         <div class="card stat small">
           <div class="stat-label">疑似字典字段</div>
@@ -1209,6 +1211,7 @@ async function openTaskLog(snapshotId) {
   const running = tasks.filter((task) => task.status === "running");
   const canPause = ["created", "running"].includes(snapshot.status);
   const canResume = snapshot.status === "paused";
+  const canRerunFailed = failed.length > 0 && !["created", "running", "paused"].includes(snapshot.status);
   $("drawer").innerHTML = `
     <div class="dr-head">
       <div>
@@ -1218,6 +1221,7 @@ async function openTaskLog(snapshotId) {
       <div class="dr-actions">
         <button data-pause="${esc(snapshot.snapshot_id)}" type="button" ${canPause ? "" : "disabled"}>暂停</button>
         <button data-resume="${esc(snapshot.snapshot_id)}" type="button" ${canResume ? "" : "disabled"}>恢复</button>
+        <button data-rerun-failed="${esc(snapshot.snapshot_id)}" class="rerun" type="button" ${canRerunFailed ? "" : "disabled"}>重跑失败</button>
         <button class="dr-close" data-close-drawer type="button">×</button>
       </div>
     </div>
@@ -1376,6 +1380,17 @@ document.addEventListener("click", async (event) => {
       await api(`/api/scans/${encodeURIComponent(target.dataset.resume)}/resume`, { method: "POST" });
       await refreshAll({ reroute: false });
       if ($("drawer").classList.contains("open")) await openTaskLog(target.dataset.resume);
+    }
+    if (target.dataset.rerunFailed) {
+      const snapshotId = target.dataset.rerunFailed;
+      const data = await api(`/api/scans/${encodeURIComponent(snapshotId)}/rerun-failed`, { method: "POST" });
+      state.snapshotId = snapshotId;
+      state.tableCache.clear();
+      state.columnCache.clear();
+      toast(`已重新排队 ${data.reset_task_count} 个任务`);
+      startPolling();
+      await refreshAll({ reroute: false });
+      if ($("drawer").classList.contains("open")) await openTaskLog(snapshotId);
     }
     if (target.dataset.deleteSnapshot) {
       await api(`/api/snapshots/${encodeURIComponent(target.dataset.deleteSnapshot)}`, { method: "DELETE" });

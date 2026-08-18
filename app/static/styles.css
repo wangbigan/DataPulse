@@ -478,6 +478,7 @@ h3 { font-size: 14px; margin-bottom: 14px; }
   font-size: 12px;
 }
 .dr-actions button:not(.dr-close):hover:not(:disabled) { border-color: var(--teal-l); }
+.dr-actions button.rerun:not(:disabled) { border-color: var(--teal); color: var(--teal); font-weight: 600; }
 .dr-actions button:disabled { color: #94a3b8; background: #f8fafc; cursor: not-allowed; }
 .dr-close { border: none; background: #f1f5f9; width: 30px; height: 30px; border-radius: 8px; cursor: pointer; color: var(--mut); font-size: 13px; flex: 0 0 auto; }
 .dr-close:hover { background: #e2e8f0; }
